@@ -2,6 +2,23 @@ import argparse
 import easyocr
 
 
+def str2bool(v):
+    """Convert a string representation of a boolean to a Python bool.
+
+    This is needed because argparse's built-in ``type=bool`` converts any
+    non-empty string to ``True`` (e.g. ``bool("False") == True``), which
+    makes it impossible to pass ``False`` from the command line.
+    """
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('yes', 'true', 't', 'y', '1'):
+        return True
+    elif v.lower() in ('no', 'false', 'f', 'n', '0'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Process EasyOCR.")
     parser.add_argument(
@@ -14,7 +31,7 @@ def parse_args():
     )
     parser.add_argument(
         "--gpu",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Using GPU (default: True)",
@@ -39,35 +56,35 @@ def parse_args():
     )
     parser.add_argument(
         "--download_enabled",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Enable Download",
     )
     parser.add_argument(
         "--detector",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Initialize text detector module",
     )
     parser.add_argument(
         "--recognizer",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Initialize text recognizer module",
     )
     parser.add_argument(
         "--verbose",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Print detail/warning",
     )
     parser.add_argument(
         "--quantize",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Use dynamic quantization",
@@ -131,7 +148,7 @@ def parse_args():
     )
     parser.add_argument(
         "--paragraph",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=False,
         help="Combine result into paragraph",

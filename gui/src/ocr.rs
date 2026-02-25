@@ -247,32 +247,55 @@ fn parse_easyocr_output(output: &str) -> Vec<OcrLine> {
 }
 
 fn parse_line(s: &str) -> Option<OcrLine> {
-    // Strip outer parens: "(...)"
     let s = s.trim();
-    let s = s.strip_prefix('(')?.strip_suffix(')')?;
 
-    // Find the split between bbox tuple and the rest.
-    // The bbox is "[[...]]", then a comma, then the text, then a comma, then the confidence.
-    let bracket_end = s.find("]]")?;
-    let bbox_str = &s[..bracket_end + 2];
-    let rest = s[bracket_end + 2..].trim().strip_prefix(',')?.trim();
+    // Two possible formats produced by the EasyOCR CLI:
+    //
+    // 1. Normal (detail=1, paragraph=False):
+    //      ([[x1,y1],[x2,y2],[x3,y3],[x4,y4]], 'text', 0.99)
+    //
+    // 2. Paragraph mode (paragraph=True):
+    //      [[[x1,y1],[x2,y2],[x3,y3],[x4,y4]], 'text']
+    //    (no confidence value; bounding box is a list not a tuple)
+    let (inner, has_confidence) = if s.starts_with('(') && s.ends_with(')') {
+        (s.strip_prefix('(')?.strip_suffix(')')?, true)
+    } else if s.starts_with('[') && s.ends_with(']') {
+        (s.strip_prefix('[')?.strip_suffix(']')?, false)
+    } else {
+        return None;
+    };
+
+    // Find the end of the bbox part "[[...]]".
+    let bracket_end = inner.find("]]")?;
+    let bbox_str = &inner[..bracket_end + 2];
+    let rest = inner[bracket_end + 2..].trim().strip_prefix(',')?.trim();
 
     // Parse bbox: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
     let bbox = parse_bbox(bbox_str)?;
 
-    // rest is now "'text', 0.99" or '"text", 0.99'
-    // Find the last comma — before the confidence value.
-    let last_comma = rest.rfind(',')?;
-    let text_part = rest[..last_comma].trim();
-    let conf_part = rest[last_comma + 1..].trim();
+    let (text, confidence) = if has_confidence {
+        // rest is "'text', 0.99" or '"text", 0.99'
+        // Find the last comma — before the confidence value.
+        let last_comma = rest.rfind(',')?;
+        let text_part = rest[..last_comma].trim();
+        let conf_part = rest[last_comma + 1..].trim();
 
-    // Strip quotes from text.
-    let text = text_part
-        .trim_start_matches(['\'', '"'])
-        .trim_end_matches(['\'', '"'])
-        .to_string();
+        let text = text_part
+            .trim_start_matches(['\'', '"'])
+            .trim_end_matches(['\'', '"'])
+            .to_string();
 
-    let confidence: f32 = conf_part.parse().ok()?;
+        let confidence: f32 = conf_part.parse().ok()?;
+        (text, confidence)
+    } else {
+        // Paragraph mode: rest is just "'text'" with no confidence.
+        let text = rest
+            .trim_start_matches(['\'', '"'])
+            .trim_end_matches(['\'', '"'])
+            .to_string();
+        // No confidence value in paragraph output; use 1.0 as a sentinel.
+        (text, 1.0f32)
+    };
 
     Some(OcrLine {
         bbox,
@@ -354,5 +377,37 @@ mod tests {
         assert_eq!(expand_home_dir("~"), home);
         assert_eq!(expand_home_dir("~/models"), format!("{home}/models"));
         assert_eq!(expand_home_dir("/tmp/models"), "/tmp/models");
+    }
+
+    #[test]
+    fn parse_line_normal_tuple_format() {
+        use super::{parse_easyocr_output};
+        let output = "([[132, 36], [295, 36], [295, 74], [132, 74]], 'Hello', 0.9999)";
+        let lines = parse_easyocr_output(output);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "Hello");
+        assert!((lines[0].confidence - 0.9999).abs() < 0.0001);
+    }
+
+    #[test]
+    fn parse_line_paragraph_list_format() {
+        use super::{parse_easyocr_output};
+        // Paragraph mode output: list with bbox and text, no confidence.
+        let output = "[[[0, 0], [100, 0], [100, 30], [0, 30]], 'merged text']";
+        let lines = parse_easyocr_output(output);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "merged text");
+        assert!((lines[0].confidence - 1.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn parse_easyocr_output_skips_non_matching_lines() {
+        use super::{parse_easyocr_output};
+        let output = "CUDA not available, using cpu instead\n\
+                      ([[0, 0], [10, 0], [10, 5], [0, 5]], 'text', 0.95)\n\
+                      Loading model...";
+        let lines = parse_easyocr_output(output);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "text");
     }
 }
