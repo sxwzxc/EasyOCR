@@ -1,0 +1,168 @@
+name: Build EasyOCR GUI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ── Linux (x86_64) ──────────────────────────────────────────────────────────
+  build-linux:
+    name: Build · Linux x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libxcomposite-dev \
+            libxdamage-dev \
+            libxfixes-dev \
+            libxext-dev \
+            libxrender-dev \
+            libfreetype6-dev \
+            libfontconfig1-dev \
+            libssl-dev \
+            pkg-config
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gui/target
+          key: linux-cargo-${{ hashFiles('gui/Cargo.lock') }}
+          restore-keys: linux-cargo-
+
+      - name: Build (release)
+        working-directory: gui
+        run: cargo build --release
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: easyocr-gui-linux-x86_64
+          path: gui/target/release/easyocr-gui
+          if-no-files-found: error
+
+  # ── macOS (Apple Silicon + Intel universal) ─────────────────────────────────
+  build-macos:
+    name: Build · macOS universal
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain (multi-target)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Cache Cargo registry & build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gui/target
+          key: macos-cargo-${{ hashFiles('gui/Cargo.lock') }}
+          restore-keys: macos-cargo-
+
+      - name: Build arm64
+        working-directory: gui
+        run: cargo build --release --target aarch64-apple-darwin
+
+      - name: Build x86_64
+        working-directory: gui
+        run: cargo build --release --target x86_64-apple-darwin
+
+      - name: Create universal binary
+        run: |
+          lipo -create -output gui/target/easyocr-gui \
+            gui/target/aarch64-apple-darwin/release/easyocr-gui \
+            gui/target/x86_64-apple-darwin/release/easyocr-gui
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: easyocr-gui-macos-universal
+          path: gui/target/easyocr-gui
+          if-no-files-found: error
+
+  # ── Windows (x86_64) ────────────────────────────────────────────────────────
+  build-windows:
+    name: Build · Windows x86_64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry & build artefacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            gui/target
+          key: windows-cargo-${{ hashFiles('gui/Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      - name: Build (release)
+        working-directory: gui
+        run: cargo build --release
+
+      - name: Upload artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: easyocr-gui-windows-x86_64
+          path: gui/target/release/easyocr-gui.exe
+          if-no-files-found: error
+
+  # ── Release: attach binaries to a GitHub tag release ────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [build-linux, build-macos, build-windows]
+    runs-on: ubuntu-22.04
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Rename artefacts for release
+        run: |
+          mv artifacts/easyocr-gui-linux-x86_64/easyocr-gui   artifacts/easyocr-gui-linux-x86_64
+          mv artifacts/easyocr-gui-macos-universal/easyocr-gui artifacts/easyocr-gui-macos-universal
+          mv artifacts/easyocr-gui-windows-x86_64/easyocr-gui.exe artifacts/easyocr-gui-windows-x86_64.exe
+
+      - name: Create release and upload binaries
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/easyocr-gui-linux-x86_64
+            artifacts/easyocr-gui-macos-universal
+            artifacts/easyocr-gui-windows-x86_64.exe
+          generate_release_notes: true
