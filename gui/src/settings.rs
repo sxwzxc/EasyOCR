@@ -87,7 +87,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            languages: "en".to_string(),
+            languages: "ch_sim,en".to_string(),
             gpu: false,
             workers: 0,
             decoder: Decoder::Greedy,
