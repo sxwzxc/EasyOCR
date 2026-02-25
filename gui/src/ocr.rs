@@ -29,8 +29,18 @@ pub struct OcrLine {
 /// If `configured_exe` is non-empty, only that path is attempted.
 pub fn resolve_easyocr_cmd(configured_exe: &str) -> Option<(String, Vec<String>)> {
     if !configured_exe.is_empty() {
-        // User provided a custom path — use it unconditionally.
-        return Some((configured_exe.to_string(), vec![]));
+        // User provided a custom path.
+        // Support both the easyocr script and python executable.
+        if probe_cmd(configured_exe, &[]) {
+            return Some((configured_exe.to_string(), vec![]));
+        }
+        if probe_cmd(configured_exe, &["-m", "easyocr.cli"]) {
+            return Some((
+                configured_exe.to_string(),
+                vec!["-m".to_string(), "easyocr.cli".to_string()],
+            ));
+        }
+        return None;
     }
 
     // 1. Try the `easyocr` script on PATH.
@@ -121,20 +131,7 @@ fn run_ocr_sync(image_path: &Path, settings: &Settings) -> OcrResult {
     };
 
     // Build language list: split on comma/space, collect unique.
-    let langs: Vec<String> = settings
-        .languages
-        .split([',', ' '])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_owned)
-        .collect();
-
-    if langs.is_empty() {
-        return OcrResult {
-            lines: vec![],
-            error: Some("No languages configured. Please add at least one language code in Settings.".into()),
-        };
-    }
+    let langs = parse_languages(&settings.languages);
 
     let mut cmd = Command::new(&exe);
     cmd.args(&prefix_args);
@@ -188,7 +185,7 @@ fn run_ocr_sync(image_path: &Path, settings: &Settings) -> OcrResult {
     // Model storage directory.
     if !settings.model_storage_directory.is_empty() {
         cmd.arg("--model_storage_directory")
-            .arg(&settings.model_storage_directory);
+            .arg(expand_home_dir(&settings.model_storage_directory));
     }
 
     // Capture stderr for error messages.
@@ -302,4 +299,60 @@ fn parse_bbox(s: &str) -> Option<[[f32; 2]; 4]> {
         result[i][1] = coords[1].trim().parse().ok()?;
     }
     Some(result)
+}
+
+fn parse_languages(raw: &str) -> Vec<String> {
+    let langs: Vec<String> = raw
+        .split([',', '，', ' ', ';', '；'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned)
+        .collect();
+
+    if langs.is_empty() {
+        vec!["ch_sim".to_string(), "en".to_string()]
+    } else {
+        langs
+    }
+}
+
+fn expand_home_dir(path: &str) -> String {
+    if path == "~" {
+        return std::env::var("HOME").unwrap_or_else(|_| path.to_string());
+    }
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return format!("{home}/{rest}");
+        }
+    }
+    path.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{expand_home_dir, parse_languages};
+
+    #[test]
+    fn parse_languages_uses_default_when_empty() {
+        assert_eq!(parse_languages(""), vec!["ch_sim", "en"]);
+        assert_eq!(parse_languages(" , ; ， "), vec!["ch_sim", "en"]);
+    }
+
+    #[test]
+    fn parse_languages_supports_common_separators() {
+        assert_eq!(parse_languages("ch_sim,en"), vec!["ch_sim", "en"]);
+        assert_eq!(parse_languages("ch_sim，en"), vec!["ch_sim", "en"]);
+        assert_eq!(parse_languages("ch_sim en"), vec!["ch_sim", "en"]);
+    }
+
+    #[test]
+    fn expand_home_dir_expands_tilde_prefix() {
+        let home = std::env::var("HOME").unwrap_or_default();
+        if home.is_empty() {
+            return;
+        }
+        assert_eq!(expand_home_dir("~"), home);
+        assert_eq!(expand_home_dir("~/models"), format!("{home}/models"));
+        assert_eq!(expand_home_dir("/tmp/models"), "/tmp/models");
+    }
 }
