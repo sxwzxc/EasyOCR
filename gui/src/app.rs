@@ -1,5 +1,6 @@
+use crate::i18n;
 use crate::ocr::{self, OcrResult};
-use crate::settings::{Decoder, Settings};
+use crate::settings::{Decoder, Settings, UiLanguage};
 use egui::{
     Color32, ColorImage, FontId, RichText, Rounding, Stroke, TextureHandle, Vec2,
 };
@@ -59,12 +60,13 @@ impl EasyOcrApp {
         // Start a background check for the easyocr CLI so the window opens
         // immediately without any freeze.
         let setup_rx = ocr::check_easyocr_async(&settings.easyocr_exe);
+        let s = i18n::get(&settings.ui_language);
         Self {
             tab: Tab::Ocr,
             image: None,
             ocr_state: OcrState::Idle,
             ocr_result_text: String::new(),
-            status_message: "Load an image to start OCR.".into(),
+            status_message: s.status_load_image.into(),
             settings,
             settings_save_msg: None,
             copied_timer: 0.0,
@@ -72,6 +74,11 @@ impl EasyOcrApp {
             setup_rx: Some(setup_rx),
             show_setup_dialog: false,
         }
+    }
+
+    /// Shorthand to retrieve the current i18n string table.
+    fn s(&self) -> &'static i18n::Strings {
+        i18n::get(&self.settings.ui_language)
     }
 
     // ── image loading helpers ────────────────────────────────────────────────
@@ -86,13 +93,16 @@ impl EasyOcrApp {
                     color_image,
                     egui::TextureOptions::LINEAR,
                 );
-                self.image = Some(LoadedImage { path, texture, width: w, height: h });
+                self.image = Some(LoadedImage { path: path.clone(), texture, width: w, height: h });
                 self.ocr_state = OcrState::Idle;
                 self.ocr_result_text.clear();
-                self.status_message = "Image loaded. Press 'Run OCR' to recognise text.".into();
+                let name = path.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                self.status_message = self.s().status_image_loaded.replacen("{}", &name, 1);
             }
             Err(e) => {
-                self.status_message = format!("Failed to load image: {}", e);
+                self.status_message = self.s().status_failed_load_image.replacen("{}", &e, 1);
             }
         }
     }
@@ -108,7 +118,7 @@ impl EasyOcrApp {
         // Save to a temp PNG so that the easyocr CLI can read it.
         let tmp_path = std::env::temp_dir().join("easyocr_gui_tmp.png");
         if let Err(e) = save_rgba_as_png(&rgba, width as u32, height as u32, &tmp_path) {
-            self.status_message = format!("Could not save temporary image: {}", e);
+            self.status_message = self.s().status_cant_save_tmp.replacen("{}", &e, 1);
             return;
         }
 
@@ -122,8 +132,7 @@ impl EasyOcrApp {
         });
         self.ocr_state = OcrState::Idle;
         self.ocr_result_text.clear();
-        self.status_message =
-            format!("{} loaded. Press 'Run OCR' to recognise text.", label);
+        self.status_message = self.s().status_image_loaded.replacen("{}", label, 1);
     }
 
     // ── actions ──────────────────────────────────────────────────────────────
@@ -144,15 +153,15 @@ impl EasyOcrApp {
                     let w = img.width;
                     let h = img.height;
                     let bytes: Vec<u8> = img.bytes.into_owned();
-                    self.load_image_from_rgba(bytes, w, h, ctx, "Clipboard image");
+                    let label = self.s().btn_paste_image;
+                    self.load_image_from_rgba(bytes, w, h, ctx, label);
                 }
                 Err(_) => {
-                    self.status_message =
-                        "No image found in clipboard. Copy an image first.".into();
+                    self.status_message = self.s().status_no_image_clipboard.into();
                 }
             },
             Err(e) => {
-                self.status_message = format!("Clipboard unavailable: {}", e);
+                self.status_message = self.s().status_clipboard_unavailable.replacen("{}", &e.to_string(), 1);
             }
         }
     }
@@ -161,7 +170,7 @@ impl EasyOcrApp {
         match screenshots::Screen::all() {
             Ok(screens) => {
                 if screens.is_empty() {
-                    self.status_message = "No screens found.".into();
+                    self.status_message = self.s().status_no_screens.into();
                     return;
                 }
                 let screen = &screens[0];
@@ -170,15 +179,16 @@ impl EasyOcrApp {
                         let w = img.width() as usize;
                         let h = img.height() as usize;
                         let rgba: Vec<u8> = img.into_raw();
-                        self.load_image_from_rgba(rgba, w, h, ctx, "Screenshot");
+                        let label = self.s().btn_screenshot;
+                        self.load_image_from_rgba(rgba, w, h, ctx, label);
                     }
                     Err(e) => {
-                        self.status_message = format!("Screenshot failed: {}", e);
+                        self.status_message = self.s().status_screenshot_failed.replacen("{}", &e.to_string(), 1);
                     }
                 }
             }
             Err(e) => {
-                self.status_message = format!("Cannot enumerate screens: {}", e);
+                self.status_message = self.s().status_cant_enum_screens.replacen("{}", &e.to_string(), 1);
             }
         }
     }
@@ -187,7 +197,7 @@ impl EasyOcrApp {
         if let Some(loaded) = &self.image {
             self.ocr_state =
                 OcrState::Running(ocr::run_ocr_async(&loaded.path, &self.settings));
-            self.status_message = "Running OCR…".into();
+            self.status_message = self.s().status_running_ocr.into();
             self.ocr_result_text.clear();
         }
     }
@@ -210,7 +220,11 @@ impl EasyOcrApp {
 
         if let Some(res) = result {
             if let Some(err) = res.error {
-                self.status_message = format!("OCR failed: {}", err.lines().next().unwrap_or(""));
+                self.status_message = self.s().status_ocr_failed.replacen(
+                    "{}",
+                    err.lines().next().unwrap_or(""),
+                    1,
+                );
                 self.ocr_state = OcrState::Error(err);
             } else {
                 let count = res.lines.len();
@@ -220,8 +234,11 @@ impl EasyOcrApp {
                     .map(|l| format!("{} ({:.1}%)", l.text, l.confidence * 100.0))
                     .collect::<Vec<_>>()
                     .join("\n");
-                self.status_message =
-                    format!("OCR complete — {} text region(s) detected.", count);
+                self.status_message = self.s().status_ocr_complete.replacen(
+                    "{}",
+                    &count.to_string(),
+                    1,
+                );
                 self.ocr_state = OcrState::Done;
             }
         }
@@ -234,8 +251,9 @@ impl EasyOcrApp {
             return;
         }
 
+        let s = self.s();
         let mut open = true;
-        egui::Window::new("⚙  EasyOCR Setup")
+        egui::Window::new(s.setup_title)
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -245,18 +263,16 @@ impl EasyOcrApp {
                 ui.add_space(4.0);
 
                 ui.label(
-                    RichText::new("The easyocr command was not found on your system.")
+                    RichText::new(s.setup_not_found)
                         .strong()
                         .color(Color32::from_rgb(251, 191, 36)),
                 );
-                ui.label(
-                    "EasyOCR must be installed before this application can recognise text.",
-                );
+                ui.label(s.setup_must_install);
                 ui.add_space(12.0);
 
                 // ── Step 1 ───────────────────────────────────────────────────
-                ui.label(RichText::new("Step 1 — Install Python 3.8 or newer").strong());
-                ui.label("Download and install Python from:");
+                ui.label(RichText::new(s.setup_step1_title).strong());
+                ui.label(s.setup_step1_desc);
                 ui.label(
                     RichText::new("  https://www.python.org/downloads/")
                         .monospace()
@@ -265,8 +281,8 @@ impl EasyOcrApp {
                 ui.add_space(8.0);
 
                 // ── Step 2 ───────────────────────────────────────────────────
-                ui.label(RichText::new("Step 2 — Install EasyOCR").strong());
-                ui.label("Open a terminal and run:");
+                ui.label(RichText::new(s.setup_step2_title).strong());
+                ui.label(s.setup_step2_desc);
                 ui.label(
                     RichText::new("  pip install easyocr")
                         .monospace()
@@ -276,24 +292,17 @@ impl EasyOcrApp {
                 ui.add_space(8.0);
 
                 // ── Step 3 ───────────────────────────────────────────────────
-                ui.label(RichText::new("Step 3 — Language Models").strong());
-                ui.label(
-                    "Models are downloaded automatically the first time you run OCR for a \
-                     language.\nThe initial download may take a few minutes depending on your \
-                     internet connection.",
-                );
+                ui.label(RichText::new(s.setup_step3_title).strong());
+                ui.label(s.setup_step3_desc);
                 ui.add_space(10.0);
 
                 ui.separator();
                 ui.add_space(6.0);
 
                 ui.label(
-                    RichText::new(
-                        "Tip: you can also point the app at a custom EasyOCR executable via \
-                         the Settings tab.",
-                    )
-                    .color(Color32::GRAY)
-                    .small(),
+                    RichText::new(s.setup_tip)
+                        .color(Color32::GRAY)
+                        .small(),
                 );
                 ui.add_space(10.0);
 
@@ -304,7 +313,7 @@ impl EasyOcrApp {
                         if ui
                             .add(
                                 egui::Button::new(
-                                    RichText::new("✓  Check Again")
+                                    RichText::new(s.setup_btn_check)
                                         .color(Color32::WHITE)
                                         .strong(),
                                 )
@@ -319,14 +328,14 @@ impl EasyOcrApp {
                         }
                     });
 
-                    if ui.button("Continue Anyway").clicked() {
+                    if ui.button(s.setup_btn_continue).clicked() {
                         self.show_setup_dialog = false;
                     }
 
                     if self.setup_status == SetupStatus::Checking {
                         ui.spinner();
                         ui.label(
-                            RichText::new("Checking…").color(Color32::GRAY).small(),
+                            RichText::new(s.setup_checking).color(Color32::GRAY).small(),
                         );
                     }
                 });
@@ -341,41 +350,43 @@ impl EasyOcrApp {
     // ── UI helpers ───────────────────────────────────────────────────────────
 
     fn draw_tab_bar(&mut self, ui: &mut egui::Ui) {
+        let s = self.s();
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            tab_button(ui, "🔍  OCR", self.tab == Tab::Ocr, || {
+            tab_button(ui, s.tab_ocr, self.tab == Tab::Ocr, || {
                 self.tab = Tab::Ocr
             });
-            tab_button(ui, "⚙  Settings", self.tab == Tab::Settings, || {
+            tab_button(ui, s.tab_settings, self.tab == Tab::Settings, || {
                 self.tab = Tab::Settings
             });
         });
     }
 
     fn draw_ocr_tab(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        let s = self.s();
         // ── Toolbar ──────────────────────────────────────────────────────────
         ui.add_space(8.0);
         ui.horizontal(|ui| {
-            if toolbar_button(ui, "📂 Open Image").clicked() {
+            if toolbar_button(ui, s.btn_open_image).clicked() {
                 self.action_open_file(ctx);
             }
-            if toolbar_button(ui, "📋 Paste Image").clicked() {
+            if toolbar_button(ui, s.btn_paste_image).clicked() {
                 self.action_paste_clipboard(ctx);
             }
-            if toolbar_button(ui, "📷 Screenshot").clicked() {
+            if toolbar_button(ui, s.btn_screenshot).clicked() {
                 self.action_screenshot(ctx);
             }
             if self.setup_status == SetupStatus::Missing {
                 if ui
                     .add(
                         egui::Button::new(
-                            RichText::new("⚠ Setup").color(Color32::WHITE).strong(),
+                            RichText::new(s.btn_setup).color(Color32::WHITE).strong(),
                         )
                         .fill(Color32::from_rgb(202, 138, 4))
                         .rounding(Rounding::same(4.0))
                         .min_size(Vec2::new(80.0, 32.0)),
                     )
-                    .on_hover_text("EasyOCR is not installed — click for setup instructions")
+                    .on_hover_text(s.tooltip_setup)
                     .clicked()
                 {
                     self.show_setup_dialog = true;
@@ -388,7 +399,7 @@ impl EasyOcrApp {
                     if ui
                         .add(
                             egui::Button::new(
-                                RichText::new("▶  Run OCR").color(Color32::WHITE).strong(),
+                                RichText::new(s.btn_run_ocr).color(Color32::WHITE).strong(),
                             )
                             .fill(Color32::from_rgb(37, 99, 235))
                             .min_size(Vec2::new(120.0, 32.0)),
@@ -426,11 +437,9 @@ impl EasyOcrApp {
                         } else {
                             ui.centered_and_justified(|ui| {
                                 ui.label(
-                                    RichText::new(
-                                        "Drop an image here\nor use the buttons above",
-                                    )
-                                    .color(Color32::GRAY)
-                                    .size(16.0),
+                                    RichText::new(s.placeholder_drop_image)
+                                        .color(Color32::GRAY)
+                                        .size(16.0),
                                 );
                             });
                         }
@@ -443,14 +452,14 @@ impl EasyOcrApp {
             ui.vertical(|ui| {
                 ui.set_height(panel_height);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Results").strong());
+                    ui.label(RichText::new(s.lbl_results).strong());
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
                             let btn_label = if self.copied_timer > 0.0 {
-                                "✔ Copied!"
+                                s.btn_copied
                             } else {
-                                "⎘ Copy"
+                                s.btn_copy
                             };
                             if ui
                                 .add_enabled(
@@ -517,42 +526,48 @@ impl EasyOcrApp {
 
     fn draw_settings_tab(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
+            let s = self.s();
             ui.add_space(12.0);
-            section_header(ui, "Languages");
+            section_header(ui, s.section_languages);
             ui.horizontal(|ui| {
-                ui.label("Language codes:");
+                ui.label(s.lbl_language_codes);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.settings.languages)
                         .desired_width(200.0)
-                        .hint_text("e.g. en,ch_sim,fr"),
+                        .hint_text(s.hint_language_codes),
                 );
                 ui.label(
-                    RichText::new("(comma-separated)")
+                    RichText::new(s.lbl_comma_separated)
                         .color(Color32::GRAY)
                         .small(),
                 );
             });
             ui.add_space(12.0);
 
-            section_header(ui, "Hardware");
-            ui.checkbox(&mut self.settings.gpu, "Enable GPU acceleration");
+            section_header(ui, s.section_hardware);
+            ui.checkbox(&mut self.settings.gpu, s.lbl_gpu);
             ui.horizontal(|ui| {
-                ui.label("Parallel CPU workers:");
+                ui.label(s.lbl_workers);
                 ui.add(
                     egui::DragValue::new(&mut self.settings.workers)
                         .range(0..=64)
-                        .suffix(" workers"),
+                        .suffix(s.lbl_workers_suffix),
                 );
                 ui.label(
-                    RichText::new("(0 = auto)").color(Color32::GRAY).small(),
+                    RichText::new(s.hint_workers_auto).color(Color32::GRAY).small(),
                 );
             });
-            ui.checkbox(&mut self.settings.quantize, "Use dynamic quantization (reduces memory)");
+            ui.checkbox(&mut self.settings.quantize, s.lbl_quantize);
             ui.add_space(12.0);
 
-            section_header(ui, "Decoder");
+            section_header(ui, s.section_decoder);
             for dec in Decoder::all() {
-                ui.radio_value(&mut self.settings.decoder, dec.clone(), dec.label());
+                let label = match dec {
+                    Decoder::Greedy => s.decoder_greedy,
+                    Decoder::BeamSearch => s.decoder_beam,
+                    Decoder::WordBeamSearch => s.decoder_word_beam,
+                };
+                ui.radio_value(&mut self.settings.decoder, dec.clone(), label);
             }
             ui.add_space(4.0);
             ui.add_enabled_ui(
@@ -562,7 +577,7 @@ impl EasyOcrApp {
                 ),
                 |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Beam width:");
+                        ui.label(s.lbl_beam_width);
                         ui.add(
                             egui::DragValue::new(&mut self.settings.beam_width)
                                 .range(1..=50),
@@ -572,27 +587,24 @@ impl EasyOcrApp {
             );
             ui.add_space(12.0);
 
-            section_header(ui, "Recognition");
+            section_header(ui, s.section_recognition);
             ui.horizontal(|ui| {
-                ui.label("Batch size:");
+                ui.label(s.lbl_batch_size);
                 ui.add(
                     egui::DragValue::new(&mut self.settings.batch_size)
                         .range(1..=64),
                 );
             });
             ui.horizontal(|ui| {
-                ui.label("Min text box size (px):");
+                ui.label(s.lbl_min_size);
                 ui.add(
                     egui::DragValue::new(&mut self.settings.min_size)
                         .range(1..=200),
                 );
             });
-            ui.checkbox(
-                &mut self.settings.paragraph,
-                "Merge results into paragraphs",
-            );
+            ui.checkbox(&mut self.settings.paragraph, s.lbl_paragraph);
             ui.horizontal(|ui| {
-                ui.label("Bounding box margin:");
+                ui.label(s.lbl_margin);
                 ui.add(
                     egui::Slider::new(&mut self.settings.add_margin, 0.0..=0.5)
                         .fixed_decimals(2),
@@ -600,54 +612,34 @@ impl EasyOcrApp {
             });
             ui.add_space(12.0);
 
-            section_header(ui, "Detection Thresholds");
-            threshold_row(
-                ui,
-                "Text confidence:",
-                &mut self.settings.text_threshold,
-                "Minimum confidence to accept a text region.",
-            );
-            threshold_row(
-                ui,
-                "Low-text score:",
-                &mut self.settings.low_text,
-                "Lower bound for text score.",
-            );
-            threshold_row(
-                ui,
-                "Link threshold:",
-                &mut self.settings.link_threshold,
-                "Threshold for linking text regions.",
-            );
-            threshold_row(
-                ui,
-                "Contrast threshold:",
-                &mut self.settings.contrast_ths,
-                "Boxes below this contrast are processed twice.",
-            );
+            section_header(ui, s.section_thresholds);
+            threshold_row(ui, s.lbl_text_threshold, &mut self.settings.text_threshold, s.hint_text_threshold);
+            threshold_row(ui, s.lbl_low_text, &mut self.settings.low_text, s.hint_low_text);
+            threshold_row(ui, s.lbl_link_threshold, &mut self.settings.link_threshold, s.hint_link_threshold);
+            threshold_row(ui, s.lbl_contrast_ths, &mut self.settings.contrast_ths, s.hint_contrast_ths);
             ui.horizontal(|ui| {
-                ui.label("Adjust contrast to:");
+                ui.label(s.lbl_adjust_contrast);
                 ui.add(
                     egui::Slider::new(&mut self.settings.adjust_contrast, 0.0..=1.0)
                         .fixed_decimals(2),
                 );
                 ui.label(
-                    RichText::new("Target for low-contrast boxes.")
+                    RichText::new(s.hint_adjust_contrast)
                         .color(Color32::GRAY)
                         .small(),
                 );
             });
             ui.add_space(12.0);
 
-            section_header(ui, "Paths (optional)");
+            section_header(ui, s.section_paths);
             ui.horizontal(|ui| {
-                ui.label("Model storage directory:");
+                ui.label(s.lbl_model_dir);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.settings.model_storage_directory)
                         .desired_width(260.0)
-                        .hint_text("Default: ~/.EasyOCR/model"),
+                        .hint_text(s.hint_model_dir),
                 );
-                if ui.small_button("Browse…").clicked() {
+                if ui.small_button(s.btn_browse).clicked() {
                     if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                         self.settings.model_storage_directory =
                             dir.to_string_lossy().to_string();
@@ -655,25 +647,34 @@ impl EasyOcrApp {
                 }
             });
             ui.horizontal(|ui| {
-                ui.label("EasyOCR executable path:");
+                ui.label(s.lbl_easyocr_exe);
                 ui.add(
                     egui::TextEdit::singleline(&mut self.settings.easyocr_exe)
                         .desired_width(260.0)
-                        .hint_text("Default: 'easyocr' (from PATH)"),
+                        .hint_text(s.hint_easyocr_exe),
                 );
-                if ui.small_button("Browse…").clicked() {
+                if ui.small_button(s.btn_browse).clicked() {
                     if let Some(f) = rfd::FileDialog::new().pick_file() {
                         self.settings.easyocr_exe = f.to_string_lossy().to_string();
                     }
                 }
             });
+            ui.add_space(12.0);
+
+            section_header(ui, s.section_ui);
+            ui.horizontal(|ui| {
+                ui.label(s.lbl_ui_language);
+                ui.radio_value(&mut self.settings.ui_language, UiLanguage::Chinese, "中文");
+                ui.radio_value(&mut self.settings.ui_language, UiLanguage::English, "English");
+            });
             ui.add_space(16.0);
 
             ui.horizontal(|ui| {
+                let s = self.s();
                 if ui
                     .add(
                         egui::Button::new(
-                            RichText::new("💾  Save Settings")
+                            RichText::new(s.btn_save_settings)
                                 .color(Color32::WHITE)
                                 .strong(),
                         )
@@ -685,16 +686,16 @@ impl EasyOcrApp {
                     match self.settings.save() {
                         Ok(()) => {
                             self.settings_save_msg =
-                                Some(("Settings saved successfully.".into(), false));
+                                Some((s.msg_settings_saved.into(), false));
                         }
                         Err(e) => {
                             self.settings_save_msg =
-                                Some((format!("Failed to save: {}", e), true));
+                                Some((s.msg_settings_failed.replacen("{}", &e, 1), true));
                         }
                     }
                 }
 
-                if ui.button("↺  Reset to Defaults").clicked() {
+                if ui.button(s.btn_reset).clicked() {
                     self.settings = Settings::default();
                     self.settings_save_msg = None;
                 }
@@ -727,9 +728,7 @@ impl eframe::App for EasyOcrApp {
                     } else {
                         self.setup_status = SetupStatus::Missing;
                         self.show_setup_dialog = true;
-                        self.status_message =
-                            "⚠ EasyOCR not found — click the Setup button for instructions."
-                                .into();
+                        self.status_message = self.s().status_easyocr_missing.into();
                     }
                 } else {
                     ctx.request_repaint();

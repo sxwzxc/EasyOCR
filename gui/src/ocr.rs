@@ -20,28 +20,62 @@ pub struct OcrLine {
     pub confidence: f32,
 }
 
-/// Returns `true` if the configured easyocr executable can be found and
-/// launched.  The check is performed synchronously but is intended to be
-/// called from a background thread so the UI is never blocked.
-pub fn check_easyocr_available(exe: &str) -> bool {
-    let exe = if exe.is_empty() { "easyocr" } else { exe };
-    std::process::Command::new(exe)
+/// Resolves the effective easyocr command.
+///
+/// Returns `(program, prepended_args)`.  When the `easyocr` script is found
+/// directly, `prepended_args` is empty.  When only the Python module is
+/// available, it returns e.g. `("python3", ["-m", "easyocr.cli"])`.
+///
+/// If `configured_exe` is non-empty, only that path is attempted.
+pub fn resolve_easyocr_cmd(configured_exe: &str) -> Option<(String, Vec<String>)> {
+    if !configured_exe.is_empty() {
+        // User provided a custom path — use it unconditionally.
+        return Some((configured_exe.to_string(), vec![]));
+    }
+
+    // 1. Try the `easyocr` script on PATH.
+    if probe_cmd("easyocr", &[]) {
+        return Some(("easyocr".to_string(), vec![]));
+    }
+
+    // 2. Try via Python module (handles pip installs where the script
+    //    directory is not in the GUI's PATH).
+    for python in &["python3", "python"] {
+        if probe_cmd(python, &["-m", "easyocr.cli"]) {
+            return Some((
+                python.to_string(),
+                vec!["-m".to_string(), "easyocr.cli".to_string()],
+            ));
+        }
+    }
+
+    None
+}
+
+/// Returns `true` if running `program [extra_args] --help` succeeds.
+fn probe_cmd(program: &str, extra_args: &[&str]) -> bool {
+    std::process::Command::new(program)
+        .args(extra_args)
         .arg("--help")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .is_ok()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Returns `true` if the configured easyocr executable can be found and
+/// launched.  The check is performed synchronously but is intended to be
+/// called from a background thread so the UI is never blocked.
+pub fn check_easyocr_available(exe: &str) -> bool {
+    resolve_easyocr_cmd(exe).is_some()
 }
 
 /// Spawns a background thread that checks easyocr availability and sends the
 /// result (true = available) through the returned receiver.
 pub fn check_easyocr_async(exe: &str) -> mpsc::Receiver<bool> {
     let (tx, rx) = mpsc::channel();
-    let exe = if exe.is_empty() {
-        "easyocr".to_string()
-    } else {
-        exe.to_string()
-    };
+    let exe = exe.to_string();
     thread::spawn(move || {
         let _ = tx.send(check_easyocr_available(&exe));
     });
@@ -67,11 +101,23 @@ pub fn run_ocr_async(
 }
 
 fn run_ocr_sync(image_path: &Path, settings: &Settings) -> OcrResult {
-    // Resolve executable path.
-    let exe = if settings.easyocr_exe.is_empty() {
-        "easyocr".to_string()
-    } else {
-        settings.easyocr_exe.clone()
+    // Resolve executable — try direct binary then Python module fallback.
+    let (exe, prefix_args) = match resolve_easyocr_cmd(&settings.easyocr_exe) {
+        Some(cmd) => cmd,
+        None => {
+            let tried = if settings.easyocr_exe.is_empty() {
+                "'easyocr' and 'python -m easyocr.cli'".to_string()
+            } else {
+                format!("'{}'", settings.easyocr_exe)
+            };
+            return OcrResult {
+                lines: vec![],
+                error: Some(format!(
+                    "EasyOCR command not found (tried {}).\n\nMake sure EasyOCR is installed:\n  pip install easyocr",
+                    tried
+                )),
+            };
+        }
     };
 
     // Build language list: split on comma/space, collect unique.
@@ -91,6 +137,7 @@ fn run_ocr_sync(image_path: &Path, settings: &Settings) -> OcrResult {
     }
 
     let mut cmd = Command::new(&exe);
+    cmd.args(&prefix_args);
 
     // Languages (-l can take multiple values in the EasyOCR CLI).
     cmd.arg("-l");

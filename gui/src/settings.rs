@@ -2,6 +2,18 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum UiLanguage {
+    Chinese,
+    English,
+}
+
+impl Default for UiLanguage {
+    fn default() -> Self {
+        UiLanguage::Chinese
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Decoder {
     Greedy,
     BeamSearch,
@@ -17,6 +29,7 @@ impl Decoder {
         }
     }
 
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             Decoder::Greedy => "Greedy (Fast)",
@@ -67,6 +80,8 @@ pub struct Settings {
     pub model_storage_directory: String,
     /// Optional custom easyocr executable path
     pub easyocr_exe: String,
+    /// UI display language
+    pub ui_language: UiLanguage,
 }
 
 impl Default for Settings {
@@ -89,6 +104,7 @@ impl Default for Settings {
             add_margin: 0.1,
             model_storage_directory: String::new(),
             easyocr_exe: String::new(),
+            ui_language: UiLanguage::Chinese,
         }
     }
 }
