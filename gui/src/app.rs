@@ -7,6 +7,16 @@ use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 
 #[derive(PartialEq, Clone, Copy)]
+enum SetupStatus {
+    /// Background check is in progress.
+    Checking,
+    /// easyocr CLI was found.
+    Ready,
+    /// easyocr CLI could not be found.
+    Missing,
+}
+
+#[derive(PartialEq, Clone, Copy)]
 enum Tab {
     Ocr,
     Settings,
@@ -37,19 +47,30 @@ pub struct EasyOcrApp {
     settings_save_msg: Option<(String, bool)>, // (message, is_error)
     // Copy-to-clipboard confirmation timer
     copied_timer: f32,
+    // Setup / dependency check state
+    setup_status: SetupStatus,
+    setup_rx: Option<Receiver<bool>>,
+    show_setup_dialog: bool,
 }
 
 impl EasyOcrApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let settings = Settings::load();
+        // Start a background check for the easyocr CLI so the window opens
+        // immediately without any freeze.
+        let setup_rx = ocr::check_easyocr_async(&settings.easyocr_exe);
         Self {
             tab: Tab::Ocr,
             image: None,
             ocr_state: OcrState::Idle,
             ocr_result_text: String::new(),
             status_message: "Load an image to start OCR.".into(),
-            settings: Settings::load(),
+            settings,
             settings_save_msg: None,
             copied_timer: 0.0,
+            setup_status: SetupStatus::Checking,
+            setup_rx: Some(setup_rx),
+            show_setup_dialog: false,
         }
     }
 
@@ -206,6 +227,117 @@ impl EasyOcrApp {
         }
     }
 
+    // ── setup / dependency dialog ─────────────────────────────────────────────
+
+    fn draw_setup_dialog(&mut self, ctx: &egui::Context) {
+        if !self.show_setup_dialog {
+            return;
+        }
+
+        let mut open = true;
+        egui::Window::new("⚙  EasyOCR Setup")
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+            .min_width(500.0)
+            .show(ctx, |ui| {
+                ui.add_space(4.0);
+
+                ui.label(
+                    RichText::new("The easyocr command was not found on your system.")
+                        .strong()
+                        .color(Color32::from_rgb(251, 191, 36)),
+                );
+                ui.label(
+                    "EasyOCR must be installed before this application can recognise text.",
+                );
+                ui.add_space(12.0);
+
+                // ── Step 1 ───────────────────────────────────────────────────
+                ui.label(RichText::new("Step 1 — Install Python 3.8 or newer").strong());
+                ui.label("Download and install Python from:");
+                ui.label(
+                    RichText::new("  https://www.python.org/downloads/")
+                        .monospace()
+                        .color(Color32::from_rgb(96, 165, 250)),
+                );
+                ui.add_space(8.0);
+
+                // ── Step 2 ───────────────────────────────────────────────────
+                ui.label(RichText::new("Step 2 — Install EasyOCR").strong());
+                ui.label("Open a terminal and run:");
+                ui.label(
+                    RichText::new("  pip install easyocr")
+                        .monospace()
+                        .color(Color32::from_rgb(74, 222, 128))
+                        .size(14.0),
+                );
+                ui.add_space(8.0);
+
+                // ── Step 3 ───────────────────────────────────────────────────
+                ui.label(RichText::new("Step 3 — Language Models").strong());
+                ui.label(
+                    "Models are downloaded automatically the first time you run OCR for a \
+                     language.\nThe initial download may take a few minutes depending on your \
+                     internet connection.",
+                );
+                ui.add_space(10.0);
+
+                ui.separator();
+                ui.add_space(6.0);
+
+                ui.label(
+                    RichText::new(
+                        "Tip: you can also point the app at a custom EasyOCR executable via \
+                         the Settings tab.",
+                    )
+                    .color(Color32::GRAY)
+                    .small(),
+                );
+                ui.add_space(10.0);
+
+                // ── Buttons ──────────────────────────────────────────────────
+                ui.horizontal(|ui| {
+                    let checking = self.setup_status == SetupStatus::Checking;
+                    ui.add_enabled_ui(!checking, |ui| {
+                        if ui
+                            .add(
+                                egui::Button::new(
+                                    RichText::new("✓  Check Again")
+                                        .color(Color32::WHITE)
+                                        .strong(),
+                                )
+                                .fill(Color32::from_rgb(37, 99, 235))
+                                .min_size(Vec2::new(120.0, 30.0)),
+                            )
+                            .clicked()
+                        {
+                            self.setup_rx =
+                                Some(ocr::check_easyocr_async(&self.settings.easyocr_exe));
+                            self.setup_status = SetupStatus::Checking;
+                        }
+                    });
+
+                    if ui.button("Continue Anyway").clicked() {
+                        self.show_setup_dialog = false;
+                    }
+
+                    if self.setup_status == SetupStatus::Checking {
+                        ui.spinner();
+                        ui.label(
+                            RichText::new("Checking…").color(Color32::GRAY).small(),
+                        );
+                    }
+                });
+                ui.add_space(4.0);
+            });
+
+        if !open {
+            self.show_setup_dialog = false;
+        }
+    }
+
     // ── UI helpers ───────────────────────────────────────────────────────────
 
     fn draw_tab_bar(&mut self, ui: &mut egui::Ui) {
@@ -232,6 +364,22 @@ impl EasyOcrApp {
             }
             if toolbar_button(ui, "📷 Screenshot").clicked() {
                 self.action_screenshot(ctx);
+            }
+            if self.setup_status == SetupStatus::Missing {
+                if ui
+                    .add(
+                        egui::Button::new(
+                            RichText::new("⚠ Setup").color(Color32::WHITE).strong(),
+                        )
+                        .fill(Color32::from_rgb(202, 138, 4))
+                        .rounding(Rounding::same(4.0))
+                        .min_size(Vec2::new(80.0, 32.0)),
+                    )
+                    .on_hover_text("EasyOCR is not installed — click for setup instructions")
+                    .clicked()
+                {
+                    self.show_setup_dialog = true;
+                }
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let has_image = self.image.is_some();
@@ -568,6 +716,27 @@ impl EasyOcrApp {
 
 impl eframe::App for EasyOcrApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll setup availability check.
+        if self.setup_status == SetupStatus::Checking {
+            if let Some(rx) = &self.setup_rx {
+                if let Ok(available) = rx.try_recv() {
+                    self.setup_rx = None;
+                    if available {
+                        self.setup_status = SetupStatus::Ready;
+                        self.show_setup_dialog = false;
+                    } else {
+                        self.setup_status = SetupStatus::Missing;
+                        self.show_setup_dialog = true;
+                        self.status_message =
+                            "⚠ EasyOCR not found — click the Setup button for instructions."
+                                .into();
+                    }
+                } else {
+                    ctx.request_repaint();
+                }
+            }
+        }
+
         // Poll background OCR thread.
         self.poll_ocr();
         if matches!(self.ocr_state, OcrState::Running(_)) {
@@ -616,6 +785,9 @@ impl eframe::App for EasyOcrApp {
                 Tab::Settings => self.draw_settings_tab(ui),
             }
         });
+
+        // ── Setup dialog (rendered on top of everything else) ────────────────
+        self.draw_setup_dialog(ctx);
     }
 }
 
