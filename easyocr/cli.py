@@ -2,6 +2,17 @@ import argparse
 import easyocr
 
 
+def str2bool(v):
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ('true', '1', 'yes'):
+        return True
+    elif v.lower() in ('false', '0', 'no'):
+        return False
+    else:
+        raise argparse.ArgumentTypeError('Boolean value expected.')
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Process EasyOCR.")
     parser.add_argument(
@@ -14,7 +25,7 @@ def parse_args():
     )
     parser.add_argument(
         "--gpu",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Using GPU (default: True)",
@@ -39,35 +50,35 @@ def parse_args():
     )
     parser.add_argument(
         "--download_enabled",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Enable Download",
     )
     parser.add_argument(
         "--detector",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Initialize text detector module",
     )
     parser.add_argument(
         "--recognizer",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Initialize text recognizer module",
     )
     parser.add_argument(
         "--verbose",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Print detail/warning",
     )
     parser.add_argument(
         "--quantize",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=True,
         help="Use dynamic quantization",
@@ -131,7 +142,7 @@ def parse_args():
     )
     parser.add_argument(
         "--paragraph",
-        type=bool,
+        type=str2bool,
         choices=[True, False],
         default=False,
         help="Combine result into paragraph",
