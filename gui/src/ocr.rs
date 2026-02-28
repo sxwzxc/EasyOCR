@@ -225,8 +225,9 @@ fn run_ocr_sync(image_path: &Path, settings: &Settings) -> OcrResult {
 
 /// Parse the standard EasyOCR CLI output (detail=1).
 ///
-/// Each line looks like:
-///   ([[x1,y1],[x2,y2],[x3,y3],[x4,y4]], 'text', 0.99)
+/// Each line looks like one of:
+///   ([[x1,y1],[x2,y2],[x3,y3],[x4,y4]], 'text', 0.99)        — standard mode
+///   [[[x1,y1],[x2,y2],[x3,y3],[x4,y4]], 'text']               — paragraph mode
 fn parse_easyocr_output(output: &str) -> Vec<OcrLine> {
     let mut lines = Vec::new();
 
@@ -247,12 +248,19 @@ fn parse_easyocr_output(output: &str) -> Vec<OcrLine> {
 }
 
 fn parse_line(s: &str) -> Option<OcrLine> {
-    // Strip outer parens: "(...)"
     let s = s.trim();
-    let s = s.strip_prefix('(')?.strip_suffix(')')?;
 
-    // Find the split between bbox tuple and the rest.
-    // The bbox is "[[...]]", then a comma, then the text, then a comma, then the confidence.
+    // Strip outer delimiters: "(...)" for standard mode or "[...]" for paragraph mode.
+    let s = if let Some(inner) = s.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
+        inner
+    } else if let Some(inner) = s.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
+        inner
+    } else {
+        return None;
+    };
+
+    // Find the split between bbox and the rest.
+    // The bbox is "[[...]]", then a comma, then the text, then optionally a comma and confidence.
     let bracket_end = s.find("]]")?;
     let bbox_str = &s[..bracket_end + 2];
     let rest = s[bracket_end + 2..].trim().strip_prefix(',')?.trim();
@@ -260,19 +268,25 @@ fn parse_line(s: &str) -> Option<OcrLine> {
     // Parse bbox: [[x1,y1],[x2,y2],[x3,y3],[x4,y4]]
     let bbox = parse_bbox(bbox_str)?;
 
-    // rest is now "'text', 0.99" or '"text", 0.99'
-    // Find the last comma — before the confidence value.
-    let last_comma = rest.rfind(',')?;
-    let text_part = rest[..last_comma].trim();
-    let conf_part = rest[last_comma + 1..].trim();
+    // rest is "'text', 0.99" (standard) or "'text'" (paragraph, no confidence).
+    // Try to find the last comma — before the confidence value.
+    let (text_part, confidence) = if let Some(last_comma) = rest.rfind(',') {
+        let conf_part = rest[last_comma + 1..].trim();
+        // Only treat as confidence if it actually parses as a float.
+        if let Ok(conf) = conf_part.parse::<f32>() {
+            (rest[..last_comma].trim(), conf)
+        } else {
+            (rest, 0.0)
+        }
+    } else {
+        (rest, 0.0)
+    };
 
     // Strip quotes from text.
     let text = text_part
         .trim_start_matches(['\'', '"'])
         .trim_end_matches(['\'', '"'])
         .to_string();
-
-    let confidence: f32 = conf_part.parse().ok()?;
 
     Some(OcrLine {
         bbox,
@@ -330,7 +344,7 @@ fn expand_home_dir(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{expand_home_dir, parse_languages};
+    use super::{expand_home_dir, parse_easyocr_output, parse_languages, parse_line};
 
     #[test]
     fn parse_languages_uses_default_when_empty() {
@@ -354,5 +368,51 @@ mod tests {
         assert_eq!(expand_home_dir("~"), home);
         assert_eq!(expand_home_dir("~/models"), format!("{home}/models"));
         assert_eq!(expand_home_dir("/tmp/models"), "/tmp/models");
+    }
+
+    #[test]
+    fn parse_line_standard_format() {
+        let line = "([[70, 12], [268, 12], [268, 48], [70, 48]], 'Hello World', 0.9543)";
+        let parsed = parse_line(line).expect("should parse standard format");
+        assert_eq!(parsed.text, "Hello World");
+        assert!((parsed.confidence - 0.9543).abs() < 0.001);
+        assert_eq!(parsed.bbox[0], [70.0, 12.0]);
+        assert_eq!(parsed.bbox[2], [268.0, 48.0]);
+    }
+
+    #[test]
+    fn parse_line_paragraph_format() {
+        let line = "[[[70, 12], [268, 12], [268, 48], [70, 48]], 'Hello World']";
+        let parsed = parse_line(line).expect("should parse paragraph format");
+        assert_eq!(parsed.text, "Hello World");
+        assert!((parsed.confidence - 0.0).abs() < 0.001);
+        assert_eq!(parsed.bbox[0], [70.0, 12.0]);
+    }
+
+    #[test]
+    fn parse_easyocr_output_mixed() {
+        let output = "([[10, 20], [100, 20], [100, 50], [10, 50]], 'line one', 0.85)\n\
+                      ([[10, 60], [200, 60], [200, 90], [10, 90]], 'line two', 0.92)\n";
+        let lines = parse_easyocr_output(output);
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].text, "line one");
+        assert_eq!(lines[1].text, "line two");
+    }
+
+    #[test]
+    fn parse_easyocr_output_paragraph_mode() {
+        let output = "[[[10, 20], [200, 20], [200, 90], [10, 90]], 'paragraph text']\n";
+        let lines = parse_easyocr_output(output);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].text, "paragraph text");
+        assert!((lines[0].confidence - 0.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn parse_line_text_with_comma() {
+        let line = "([[10, 20], [100, 20], [100, 50], [10, 50]], 'hello, world', 0.88)";
+        let parsed = parse_line(line).expect("should handle comma in text");
+        assert_eq!(parsed.text, "hello, world");
+        assert!((parsed.confidence - 0.88).abs() < 0.01);
     }
 }
