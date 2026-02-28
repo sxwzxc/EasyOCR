@@ -415,4 +415,12 @@ mod tests {
         assert_eq!(parsed.text, "hello, world");
         assert!((parsed.confidence - 0.88).abs() < 0.01);
     }
+
+    #[test]
+    fn parse_line_paragraph_with_comma() {
+        let line = "[[[10, 20], [100, 20], [100, 50], [10, 50]], 'hello, world']";
+        let parsed = parse_line(line).expect("should handle comma in paragraph text");
+        assert_eq!(parsed.text, "hello, world");
+        assert!((parsed.confidence - 0.0).abs() < 0.001);
+    }
 }
